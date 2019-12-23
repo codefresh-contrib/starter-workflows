@@ -1,0 +1,35 @@
+# 1. Add the '.npmrc' config with credentials to the shared configuration
+# 1.1 Codefresh Dashboard-> Account Settings -> Shared Configuration
+# 1.2 via codefresh-cli 
+# - codefresh create context secret mynpmconfig -v NPM_CONFIG_FILE="$(< ~/.npmrc)"  
+# 2. Import shared configuration to your pipeline
+
+---
+version: '1.0'
+
+steps:
+
+  Clone:
+    type: git-clone
+    arguments:
+      repo: '<REPO_OWNER>/<REPO_NAME>'
+      git: github
+      revision: 'master'
+
+  ImportNpmConfig:
+    image: alpine
+    working_directory: <REPO_NAME>
+    commands:
+      - echo ${NPM_CONFIG_FILE} |  sed 's| |\n|g' > ./.npmrc
+ 
+  npm_install:
+    image: node:10.13.0-alpine
+    working_directory: <REPO_NAME>
+    commands:
+      - npm install
+     
+  npm_publish:
+    image: node:10.13.0-alpine
+    working_directory: <REPO_NAME>
+    commands:
+      - npm publish
