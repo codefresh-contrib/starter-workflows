@@ -1,54 +1,111 @@
 # Description
-# The example Maven pipeline builds the demo spring app, deploys it to the private Bintray Maven registry, builds and pushes Docker image
+# The example Maven pipeline builds the demo spring app, deploys it to the private Bintray Maven registry,
+# builds and pushes Docker image.
 # Sources
 # The Sping demo app - https://github.com/codefresh-contrib/spring-boot-2-sample-app
-# Add the Maven settings.xml as the external resources (Pipeline/settings/external resources) - https://github.com/codefresh-contrib/starter-workflows/blob/master/configs/settings.xml
+# Add the Maven settings.xml as the external resources (Pipeline/settings/external resources):
+# - repository: https://github.com/codefresh-contrib/starter-workflows/
+# - branch: master
+# - source: configs/settings.xml
+# - destination: /root/.m2/settings.xml
 # Add as the shared secret or pipeline variables - ${MAVEN_USER}, ${MAVEN_PASSWORD}, and ${MAVEN_REPO_URL}
-# The custom settings.xml config override the default local Maven registry to the '/codefresh/volume/.m2' directory, which is shared between steps, and can be used as the local cache for the next builds.
+# The custom settings.xml config override the default local Maven registry to the '/codefresh/volume/.m2' directory,
+# which is shared between steps, and can be used as the local cache for the next builds.
 
 ---
 version: '1.0'
 
+stages:
+  - prepare
+  - build
+  - dev
+  - release
+
 steps:
 
   main_clone:
+    title: 'Cloning main repository...'
     type: git-clone
+    stage: prepare
     arguments:
       repo: '${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}'
       revision: '${{CF_REVISION}}'
       git: github
 
   maven_package:
+    title: 'Maven package'
     image: maven:3.6-jdk-8-slim
+    stage: build 
     working_directory: ${{main_clone}}
     commands:
       - mvn package
 
   maven_verify:
+    title: 'Maven verify'
     image: maven:3.6-jdk-8-slim
+    stage: build 
     working_directory: ${{main_clone}}
+    fail_fast: false
     commands:
       - mvn verify
 
-  maven_deploy:
-    image: maven:3.6-jdk-8-slim
-    working_directory: ${{main_clone}}
-    commands:
-      - mvn deploy -DaltDeploymentRepository=bintray-codefresh-demo-cfmaven::default::https://api.bintray.com/maven/codefresh-demo/cfmaven/spring-boot-sample-actuator/;publish=0
-      
   docker_build:
-    title: Building docker image
+    title: 'Build Docker image'
     type: build
+    stage: build
     working_directory: ${{main_clone}}
     arguments:
       image_name: 'codefresh/spring-boot-2-sample-app'
       tag: master
-      
-  docker_push:
-    type: push
-    arguments:
-      candidate: '${{docker_build}}'
-      tag: master
-      image_name: codefresh/spring-boot-2-sample-app
-      registry: dockerhub  
 
+  get_local_vars:
+    title: "Get variables required to deploy"
+    stage: dev
+    image: alpine:latest
+    commands:
+      - apk add xmlstarlet git --update --repository http://dl-4.alpinelinux.org/alpine/edge/testing
+      - export VERSION=$(xmlstarlet sel -N x=http://maven.apache.org/POM/4.0.0 -t -v "/x:project/x:version" pom.xml)
+      - export ARTIFACT_ID=$(xmlstarlet sel -N x=http://maven.apache.org/POM/4.0.0 -t -v "/x:project/x:artifactId" pom.xml)
+      - export SHORT_SHA=$(git rev-parse --short HEAD)
+      - cf_export VERSION
+      - cf_export SHORT_SHA
+      - cf_export ARTIFACT_ID
+
+  dev_docker_push:
+    title: 'Push Docker image with sha and branch tags'
+    stage: dev
+    type: push
+    candidate: '${{docker_build}}'
+    image_name: codefresh/spring-boot-2-sample-app
+    registry: dockerhub  
+    tags:
+      - ${{CF_BRANCH_TAG_NORMALIZED}}
+      - ${{SHORT_SHA}}
+
+  parallel_deploy:
+    type: parallel
+    stage: release
+    when:
+      branch:
+        only:
+          - master
+      steps:
+        - name: maven_verify
+          on:
+          - success
+    steps:
+      maven_deploy:
+        title: 'Deploy to Bintray'
+        image: maven:3.6-jdk-8-slim
+        working_directory: ${{main_clone}}
+        commands:
+          - mvn deploy -DaltDeploymentRepository=bintray-codefresh-demo-cfmaven::default::https://api.bintray.com/maven/codefresh-demo/cfmaven/${ARTIFACT_ID}/;publish=0
+      docker_push:
+        title: 'Push to DockerHub'
+        type: push
+        candidate: '${{docker_build}}'
+        image_name: codefresh/spring-boot-2-sample-app
+        registry: dockerhub  
+        tags:
+          - latest
+          - ${{VERSION}}
