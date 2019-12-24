@@ -1,0 +1,55 @@
+# Description
+# The example Maven pipeline builds the demo spring app, deploys it to the private Bintray Maven registry, builds and pushes Docker image
+# Sources
+# The Sping demo app - https://github.com/codefresh-contrib/spring-boot-2-sample-app
+# Add the Maven settings.xml as the external resources (Pipeline/settings/external resources) - https://github.com/codefresh-contrib/starter-workflows/blob/master/configs/settings.xml
+# Add as the shared secret or pipeline variables - ${MAVEN_USER}, ${MAVEN_PASSWORD}, and ${MAVEN_REPO_URL}
+# The custom settings.xml config override the default local Maven registry to the '/codefresh/volume/.m2' directory, which is shared between steps, and can be used as the local cache for the next builds.
+
+---
+version: '1.0'
+
+steps:
+
+  main_clone:
+    type: git-clone
+    arguments:
+      repo: '${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}'
+      revision: '${{CF_REVISION}}'
+      git: github
+
+  maven_package:
+    image: maven:3.6-jdk-8-slim
+    working_directory: ${{main_clone}}
+    commands:
+      - mvn package
+
+  maven_verify:
+    image: maven:3.6-jdk-8-slim
+    working_directory: ${{main_clone}}
+    commands:
+      - ls -la /codefresh/volume/.m2
+      - mvn verify
+
+  maven_deploy:
+    image: maven:3.6-jdk-8-slim
+    working_directory: ${{main_clone}}
+    commands:
+      - mvn deploy -DaltDeploymentRepository=bintray-codefresh-demo-cfmaven::default::https://api.bintray.com/maven/codefresh-demo/cfmaven/spring-boot-sample-actuator/;publish=0
+      
+  docker_build:
+    title: Building docker image
+    type: build
+    working_directory: ${{main_clone}}
+    arguments:
+      image_name: 'codefresh/spring-boot-2-sample-app'
+      tag: master
+      
+  docker_push:
+    type: push
+    arguments:
+      candidate: '${{docker_build}}'
+      tag: master
+      image_name: codefresh/spring-boot-2-sample-app
+      registry: dockerhub  
+
