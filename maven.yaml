@@ -56,7 +56,7 @@ steps:
     working_directory: ${{main_clone}}
     arguments:
       image_name: 'codefresh/spring-boot-2-sample-app'
-      tag: master
+      tag: ${{CF_BRANCH_TAG_NORMALIZED}}
 
   get_local_vars:
     title: "Get variables required to deploy"
