@@ -28,7 +28,6 @@ steps:
     image: maven:3.6-jdk-8-slim
     working_directory: ${{main_clone}}
     commands:
-      - ls -la /codefresh/volume/.m2
       - mvn verify
 
   maven_deploy:
