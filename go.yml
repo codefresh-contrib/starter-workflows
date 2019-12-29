@@ -1,0 +1,160 @@
+# The pipeline trigger is supposed to have
+# the "push" and "tags" events enabled
+#
+# Required environment variables:
+#
+# GOPATH=/codefresh/volume/go
+# GOCACHE=/codefresh/volume/.gocache
+# GOLANG_VERSION=1.13
+# DOCKER_IMAGE_NAME=your/image/name
+# MY_REGISTRY_INTEGRATION=your_registry_integration_name
+# CF_STORAGE_INTEGRATION=your_s3_integration_name
+# S3_BUCKET_NAME=your_s3_bucket_name
+#
+# The pipeline does:
+# 1. Clones the repo
+# 2. Builds a docker image
+# 3. Runs tests and creates the test coverage report
+# 4. Uploads the test coverage report to an S3 bucket
+# 5. In case if there is a semversioned git tag pushed to the master branch:
+#    - a docker image is pushed to a specified external registry with this tag and the latest tag
+#    - a Github release is created using the goreleaser tool
+#
+# All built images are automatically stored in the Codefresh internal registry,
+# including those, that were built from development branches
+
+version: 1.0
+
+stages:
+ - clone
+ - build
+ - test
+ - release
+
+steps:
+
+  clone:
+    type: git-clone
+    description: "Cloning the repository"
+    repo: "${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}"
+    working_directory: "${{CF_VOLUME_PATH}}/go/src/github.com"
+    revision: "${{CF_BRANCH}}"
+    stage: clone
+
+  build_docker_image:
+    type: build
+    image_name: "${{DOCKER_IMAGE_NAME}}"
+    working_directory: "${{clone}}"
+    tag: "${{CF_BRANCH_TAG_NORMALIZED}}-${{CF_SHORT_REVISION}}"
+    stage: build
+    build_arguments:
+      - "GOLANG_VERSION=${{GOLANG_VERSION}}"
+      - "GIT_PROVIDER_HOSTNAME=github.com"
+      - "REPO_NAME=${{CF_REPO_NAME}}"
+    dockerfile:
+      content: |-
+        ARG GOLANG_VERSION
+
+        FROM golang:${GOLANG_VERSION} AS build
+
+        ARG GIT_PROVIDER_HOSTNAME
+        ARG REPO_NAME
+
+        ENV SRC_PATH=src/${GIT_PROVIDER_HOSTNAME}/${REPO_NAME}
+
+        WORKDIR /go/${SRC_PATH}
+
+        COPY go.mod .
+        COPY go.sum .
+        
+        RUN go mod download
+        
+        COPY . .
+
+        RUN CGO_ENABLED=0 GOOS=linux \
+            go build -a -ldflags '-extldflags "-static"' -o /my-app . && \
+            chmod +x /my-app
+
+        FROM scratch
+
+        COPY --from=build /my-app /my-app
+
+        ENTRYPOINT ["/my-app"]
+
+  run_unit_tests:
+    type: freestyle
+    description: |-
+      Runs the tests, generates the coverage output and annotates the  docker image,
+      built in the previous step and stored in the codefresh internal registry
+    image: "golang:${{GOLANG_VERSION}}"
+    working_directory: "${{clone}}"
+    stage: test
+    commands:
+      - echo "The cache for the tests is in the folder - ${{GOCACHE}}"
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+    on_success:
+      metadata:
+       set:
+        - "${{build_docker_image.imageId}}":
+          - CF_QUALITY: true
+    on_failure:
+      metadata:
+       set:
+        - "${{build_docker_image.imageId}}":
+          - CF_QUALITY: false
+
+  upload_test_coverage:
+    description: |-
+      Uploads the test coverage report to an S3 bucket
+      and provides an url to see it in your browser
+    image: codefresh/cf-docker-test-reporting
+    working_directory: "${{clone}}"
+    stage: test
+    environment:
+      - BUCKET_NAME=${{S3_BUCKET_NAME}}
+      - CF_STORAGE_INTEGRATION=${{CF_STORAGE_INTEGRATION}}
+      - REPORT_INDEX_FILE.0=coverage.html
+      - REPORT_TYPE.0=coverage
+    fail_fast: false
+  
+  release:
+    type: parallel
+    description: |-
+      The following parallel steps are meant to upload the artifacts
+      and create a Github release, when certain conditions are met
+    stage: release
+    steps:
+
+      push_image_latest:
+        type: push
+        description: |-
+          Pushes the latest tag of the image. This step will be executed
+          only for the "push tags" git trigger event on the master branch.
+          Thus the image under the latest tag will always
+          correspond to the latest git tag on the master branch
+        image_name: "${{DOCKER_IMAGE_NAME}}"
+        registry: "${{MY_REGISTRY_INTEGRATION}}"
+        candidate: "${{build_docker_image}}"
+        tags:
+          - "${{CF_BRANCH_TAG_NORMALIZED}}"
+          - "latest"
+        when:
+          condition:
+            all:
+              gitPushTagsEventCheck: "'${{CF_BASE_BRANCH}}' == 'master'"
+
+      release_to_github:
+        type: freestyle
+        description: |-
+          Creates a github release and uploads to it binaries
+          for different architectures using the goreleaser tool
+          Executed only for the "push tags" git trigger event
+          on the master branch
+        image: "codefresh/goreleaser:${{GOLANG_VERSION}}"
+        working_directory: "${{clone}}"
+        cmd: "goreleaser --rm-dist"
+        when:
+          condition:
+            all:
+              gitPushTagsEventCheck: "'${{CF_BASE_BRANCH}}' == 'master'"
